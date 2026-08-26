@@ -3,7 +3,7 @@ module github.com/prostoteam/prostometrics-agent
 go 1.23.0
 
 require (
-	github.com/prostoteam/prostometrics-go v0.1.3
+	github.com/prostoteam/prostometrics-go v0.2.1
 	github.com/shirou/gopsutil/v3 v3.24.5
 	go.mongodb.org/mongo-driver v1.17.9
 	gopkg.in/yaml.v3 v3.0.1
