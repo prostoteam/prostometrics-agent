@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v3/disk"
@@ -16,11 +17,15 @@ import (
 
 type DiskIOCollector struct {
 	every time.Duration
+
+	mu   sync.Mutex
+	prev map[string]diskIOStats
 }
 
 func NewDiskIO(every time.Duration) *DiskIOCollector {
 	return &DiskIOCollector{
 		every: every,
+		prev:  make(map[string]diskIOStats),
 	}
 }
 
@@ -42,10 +47,16 @@ func (c *DiskIOCollector) Collect(_ context.Context) error {
 		return err
 	}
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	dirRead := prostometrics.Label("dir", "read")
 	dirWrite := prostometrics.Label("dir", "write")
 	for dev, cur := range snapshot {
 		deviceLabel := prostometrics.Label("device", dev)
+
+		prev, hadPrev := c.prev[dev]
+		c.prev[dev] = cur
 
 		prostometrics.Total("host.disk.io_kb", float64(cur.readBytes)/1024.0,
 			deviceLabel, dirRead,
@@ -66,17 +77,50 @@ func (c *DiskIOCollector) Collect(_ context.Context) error {
 		prostometrics.Total("host.disk.io_time_ms", float64(cur.ioTimeMs),
 			deviceLabel,
 		)
+
+		prostometrics.ValueSparse("host.disk.io_queue", float64(cur.inFlight),
+			deviceLabel,
+		)
+
+		// How long an average request took, rather than how many there were. A
+		// device can be quiet and still slow, which byte and operation counts
+		// cannot show. Emitted only when the device did work in the interval,
+		// because dividing by zero requests reports nothing meaningful.
+		if hadPrev {
+			emitLatency := func(dirLabel string, prevOps, curOps, prevTime, curTime uint64) {
+				ops := diffUint(prevOps, curOps)
+				if ops == 0 {
+					return
+				}
+				elapsed := diffUint(prevTime, curTime)
+				prostometrics.Value("host.disk.io_latency_ms", float64(elapsed)/float64(ops),
+					deviceLabel, prostometrics.Label("dir", dirLabel),
+				)
+			}
+			emitLatency("read", prev.readOps, cur.readOps, prev.readTimeMs, cur.readTimeMs)
+			emitLatency("write", prev.writeOps, cur.writeOps, prev.writeTimeMs, cur.writeTimeMs)
+		}
+	}
+
+	// Forget devices that are gone so an unplugged disk cannot hold memory forever.
+	for dev := range c.prev {
+		if _, ok := snapshot[dev]; !ok {
+			delete(c.prev, dev)
+		}
 	}
 
 	return nil
 }
 
 type diskIOStats struct {
-	readBytes  uint64
-	writeBytes uint64
-	readOps    uint64
-	writeOps   uint64
-	ioTimeMs   uint64
+	readBytes   uint64
+	writeBytes  uint64
+	readOps     uint64
+	writeOps    uint64
+	readTimeMs  uint64
+	writeTimeMs uint64
+	ioTimeMs    uint64
+	inFlight    uint64
 }
 
 func readDiskIOProc() (map[string]diskIOStats, error) {
@@ -100,8 +144,11 @@ func readDiskIOProc() (map[string]diskIOStats, error) {
 
 		readCompleted, _ := parseUint(fields[3])
 		sectorsRead, _ := parseUint(fields[5])
+		readTimeMs, _ := parseUint(fields[6])
 		writeCompleted, _ := parseUint(fields[7])
 		sectorsWritten, _ := parseUint(fields[9])
+		writeTimeMs, _ := parseUint(fields[10])
+		inFlight, _ := parseUint(fields[11])
 		timeInIOms, _ := parseUint(fields[12])
 
 		const sectorSize = 512
@@ -109,11 +156,14 @@ func readDiskIOProc() (map[string]diskIOStats, error) {
 		writeBytes := sectorsWritten * sectorSize
 
 		stats[dev] = diskIOStats{
-			readBytes:  readBytes,
-			writeBytes: writeBytes,
-			readOps:    readCompleted,
-			writeOps:   writeCompleted,
-			ioTimeMs:   timeInIOms,
+			readBytes:   readBytes,
+			writeBytes:  writeBytes,
+			readOps:     readCompleted,
+			writeOps:    writeCompleted,
+			readTimeMs:  readTimeMs,
+			writeTimeMs: writeTimeMs,
+			ioTimeMs:    timeInIOms,
+			inFlight:    inFlight,
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -135,11 +185,14 @@ func readDiskIOGopsutil() (map[string]diskIOStats, error) {
 		}
 
 		stats[dev] = diskIOStats{
-			readBytes:  s.ReadBytes,
-			writeBytes: s.WriteBytes,
-			readOps:    s.ReadCount,
-			writeOps:   s.WriteCount,
-			ioTimeMs:   s.IoTime,
+			readBytes:   s.ReadBytes,
+			writeBytes:  s.WriteBytes,
+			readOps:     s.ReadCount,
+			writeOps:    s.WriteCount,
+			readTimeMs:  s.ReadTime,
+			writeTimeMs: s.WriteTime,
+			ioTimeMs:    s.IoTime,
+			inFlight:    s.IopsInProgress,
 		}
 	}
 	return stats, nil

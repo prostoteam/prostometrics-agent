@@ -13,8 +13,14 @@ import (
 
 	"github.com/prostoteam/prostometrics-agent/internal/agent"
 	"github.com/prostoteam/prostometrics-agent/internal/agent/catalog"
+	execcollector "github.com/prostoteam/prostometrics-agent/internal/collectors/exec"
 	"github.com/prostoteam/prostometrics-agent/internal/collectors/mongo"
+	"github.com/prostoteam/prostometrics-agent/internal/collectors/mysql"
 	"github.com/prostoteam/prostometrics-agent/internal/collectors/nginx"
+	"github.com/prostoteam/prostometrics-agent/internal/collectors/postgres"
+	"github.com/prostoteam/prostometrics-agent/internal/collectors/prom"
+	"github.com/prostoteam/prostometrics-agent/internal/collectors/rabbitmq"
+	"github.com/prostoteam/prostometrics-agent/internal/collectors/redis"
 	prostometrics "github.com/prostoteam/prostometrics-go"
 )
 
@@ -83,10 +89,32 @@ func main() {
 	core := catalog.CoreCollectors()
 	probes := catalog.IntegrationProbes()
 	if runtimeCfg.MongoEnabled {
-		probes = append(probes, mongo.NewProbe(runtimeCfg.MongoInstances, agent.MongoEvery, mongoRetryInterval))
+		probes = append(probes, mongo.NewProbe(runtimeCfg.MongoInstances, agent.MongoEvery, integrationRetryInterval))
 	}
 	if runtimeCfg.NginxEnabled {
 		probes = append(probes, nginx.NewProbe(runtimeCfg.NginxEndpoint, agent.NginxEvery))
+	}
+	if runtimeCfg.NginxAccessLogEnabled {
+		probes = append(probes, nginx.NewAccessLogProbe(
+			runtimeCfg.NginxAccessLogPath, agent.NginxLogEvery, runtimeCfg.NginxTimeSamples))
+	}
+	if runtimeCfg.PostgresEnabled {
+		probes = append(probes, postgres.NewProbe(runtimeCfg.PostgresInstances, agent.PostgresEvery, integrationRetryInterval))
+	}
+	if runtimeCfg.MySQLEnabled {
+		probes = append(probes, mysql.NewProbe(runtimeCfg.MySQLInstances, agent.MySQLEvery, integrationRetryInterval))
+	}
+	if runtimeCfg.RedisEnabled {
+		probes = append(probes, redis.NewProbe(runtimeCfg.RedisInstances, agent.RedisEvery, integrationRetryInterval))
+	}
+	if runtimeCfg.RabbitMQEnabled {
+		probes = append(probes, rabbitmq.NewProbe(runtimeCfg.RabbitMQInstances, agent.RabbitMQEvery, integrationRetryInterval))
+	}
+	if runtimeCfg.PrometheusEnabled {
+		probes = append(probes, prom.NewProbe(runtimeCfg.PrometheusTargets, runtimeCfg.PrometheusEvery))
+	}
+	if runtimeCfg.ExecEnabled {
+		probes = append(probes, execcollector.NewProbe(runtimeCfg.ExecCommands, runtimeCfg.ExecEvery))
 	}
 	agent.Run(ctx, core, probes)
 	flushAndClose()

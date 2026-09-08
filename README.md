@@ -1,6 +1,8 @@
 # Prostometrics Agent
 
-Host-metrics agent for Prostometrics. It collects Linux host metrics and optional Docker, Nginx, and MongoDB metrics.
+Host-metrics agent for Prostometrics. It collects Linux host metrics and, when they are present, Docker, systemd,
+Nginx, MongoDB, PostgreSQL, MySQL, Redis and RabbitMQ metrics. Two generic collectors cover everything else: any
+endpoint that speaks the Prometheus text format, and any command that prints a number.
 
 ## Install
 
@@ -17,6 +19,23 @@ For a non-interactive installation:
 curl -fsSL https://raw.githubusercontent.com/prostoteam/prostometrics-agent/main/scripts/install_agent.sh -o /tmp/prostometrics-install.sh
 sudo PROSTOMETRICS_API_KEY='your-api-key' bash /tmp/prostometrics-install.sh
 ```
+
+## What is enabled automatically
+
+Nothing needs configuring for the host itself. Each optional integration is probed once at startup and skipped
+quietly when it is not there, so an unsupported kernel or a missing service costs one log line rather than a
+repeating failure.
+
+| Integration | Enabled when |
+|---|---|
+| Core host metrics | always |
+| Pressure, process, and network-stack metrics | the kernel exposes them (Linux; pressure needs 4.20+ with `CONFIG_PSI`) |
+| Docker | `/var/run/docker.sock` is a reachable socket |
+| systemd | the host was booted by systemd and `systemctl` is runnable |
+| Nginx status | a `stub_status` endpoint answers |
+| Nginx access log | `/var/log/nginx/access.log` is readable |
+| MongoDB, PostgreSQL, MySQL, Redis, RabbitMQ | instances are configured |
+| Prometheus scrape, commands | targets are configured |
 
 ## Runtime configuration
 
@@ -41,34 +60,75 @@ integrations:
   nginx:
     enabled: true
     endpoint: "http://127.0.0.1/stub_status"
+    access_log: "/var/log/nginx/access.log"
+
+  postgres:
+    instances:
+      - uri: "postgres://monitor:${PG_PASSWORD}@localhost:5432/postgres"
+
+  redis:
+    instances:
+      - uri: "redis://:${REDIS_PASSWORD}@localhost:6379"
+
+  mysql:
+    instances:
+      - dsn: "monitor:${MYSQL_PASSWORD}@tcp(127.0.0.1:3306)/"
+
+  rabbitmq:
+    instances:
+      - url: "http://monitor:${RABBIT_PASSWORD}@127.0.0.1:15672"
+
   mongo:
     instances:
       - uri: "mongodb://monitor:${MONGO_PASSWORD}@localhost:27017/admin"
-```
 
-Docker metrics are enabled when `/var/run/docker.sock` is available. Nginx probing is enabled unless explicitly
-disabled. MongoDB is enabled only when instances are configured.
+  prometheus:
+    targets:
+      - name: traefik
+        url: "http://127.0.0.1:8080/metrics"
+        metrics: ["traefik_service_requests_total", "traefik_service_open_connections"]
+
+  exec:
+    commands:
+      - metric: "backup_age_hours"
+        command: "/usr/local/bin/backup-age"
+```
 
 ## Metrics
 
 | Metric | Kind | Labels |
 |---|---|---|
+| `host.heartbeat` | counter | |
 | `host.cpu.usage_pct` | value | `cpu`, `mode` |
-| `host.mem.capacity_kb` | value | `type` |
-| `host.swap.capacity_kb` | value | `type` |
+| `host.load_avg`, `host.load_per_core` | value | `window` |
+| `host.pressure_pct` | value | `resource`, `kind` |
+| `host.mem.capacity_kb`, `host.swap.capacity_kb` | value | `type` |
+| `host.swap_io_pages` | counter | `dir` |
+| `host.oom_kills`, `host.context_switches`, `host.interrupts`, `host.forks` | counter | |
+| `host.page_faults` | counter | `type` |
+| `host.procs_count` | value | `state` |
+| `host.fd_count` | value | `type` |
 | `host.uptime_min` | value | |
-| `host.fs.capacity_kb` | value | `mount`, `device`, `type` |
-| `host.fs.inodes_count` | value | `mount`, `device`, `type` |
-| `host.disk.io_kb` | counter | `device`, `dir` |
-| `host.disk.io_ops` | counter | `device`, `dir` |
+| `host.fs.capacity_kb`, `host.fs.inodes_count` | value | `mount`, `device`, `type` |
+| `host.disk.io_kb`, `host.disk.io_ops` | counter | `device`, `dir` |
 | `host.disk.io_time_ms` | counter | `device` |
-| `host.net.kb` | counter | `iface`, `dir` |
-| `host.net.packets` | counter | `iface`, `dir` |
-| `host.net.errors` | counter | `iface`, `dir` |
-| `host.net.dropped` | counter | `iface`, `dir` |
+| `host.disk.io_latency_ms` | value | `device`, `dir` |
+| `host.disk.io_queue` | value | `device` |
+| `host.net.kb`, `host.net.packets`, `host.net.errors`, `host.net.dropped` | counter | `iface`, `dir` |
+| `host.tcp.retransmits` | counter | |
+| `host.tcp.errors`, `host.tcp.listen_drops`, `host.udp.errors` | counter | `type` |
+| `host.tcp.sockets` | value | `state` |
+| `host.conntrack` | value | `type` |
+| `docker.containers_count` | value | `state` |
 | `docker.container.*` | mixed | `service`, plus metric-specific labels |
+| `systemd.units_count` | value | `state` |
+| `systemd.unit_failed` | value | `unit` |
 | `nginx.connections` | value | `state` |
 | `nginx.totals` | counter | `type` |
-| `mongo.*` | mixed | `instance`, plus metric-specific labels |
+| `nginx.requests_count` | counter | `class` |
+| `nginx.request_time_ms`, `nginx.upstream_time_ms` | value | |
+| `postgres.*`, `mysql.*`, `redis.*`, `mongo.*` | mixed | `instance`, plus metric-specific labels |
+| `rabbitmq.*` | mixed | `instance`, plus `queue`, `type` or `state` |
 
-See [the detailed collector reference](cmd/prostometrics-agent/README.md) for cadence, units, and integration behavior.
+See [the detailed collector reference](cmd/prostometrics-agent/README.md) for cadence, units, integration behavior,
+and the full configuration reference.

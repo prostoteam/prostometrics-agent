@@ -17,3 +17,11 @@ type Collector interface {
 type CollectorCloser interface {
 	Close(ctx context.Context) error
 }
+
+// CollectorTimeout is an optional interface for collectors whose work legitimately
+// takes longer than the default. Reading a kernel file is instant; running a
+// user's shell command or scraping an HTTP endpoint is not, and cutting those off
+// at the default would report them as permanently failing.
+type CollectorTimeout interface {
+	Timeout() time.Duration
+}

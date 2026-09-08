@@ -114,7 +114,7 @@ func (r *Runner) runCollector(ctx context.Context, c Collector) {
 }
 
 func (r *Runner) collectOnce(parent context.Context, c Collector) {
-	ctx, cancel := context.WithTimeout(parent, CollectTimeout)
+	ctx, cancel := context.WithTimeout(parent, collectorTimeout(c))
 	defer cancel()
 
 	select {
@@ -137,6 +137,25 @@ func (r *Runner) collectOnce(parent context.Context, c Collector) {
 	}
 }
 
+// collectorTimeout is the deadline for one collection. A collector may ask for
+// more than the default, but never for longer than its own interval: overrunning
+// that would queue collections behind each other instead of reporting a failure.
+func collectorTimeout(c Collector) time.Duration {
+	timeout := CollectTimeout
+	if asker, ok := c.(CollectorTimeout); ok {
+		if requested := asker.Timeout(); requested > timeout {
+			timeout = requested
+		}
+	}
+	if every := c.Every(); every > 0 && timeout > every {
+		timeout = every
+	}
+	if timeout > MaxCollectTimeout {
+		timeout = MaxCollectTimeout
+	}
+	return timeout
+}
+
 func safeCollect(ctx context.Context, c Collector) (err error) {
 	defer func() {
 		if v := recover(); v != nil {
@@ -150,6 +169,13 @@ func logStartup(collectors []Collector) {
 	log.Printf("agent: started (collectors=%d timeout=%s max_concurrency=%d)", len(collectors), CollectTimeout, MaxConcurrency)
 	for _, c := range collectors {
 		if c == nil {
+			continue
+		}
+		granted := collectorTimeout(c)
+		asker, asks := c.(CollectorTimeout)
+		if asks && asker.Timeout() > granted {
+			log.Printf("collector %s: every=%s timeout=%s (asked for %s; capped by its interval and %s)",
+				c.ID(), c.Every(), granted, asker.Timeout(), MaxCollectTimeout)
 			continue
 		}
 		log.Printf("collector %s: every=%s", c.ID(), c.Every())

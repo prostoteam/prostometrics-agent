@@ -27,6 +27,12 @@ type CPUCollector struct {
 
 	mu   sync.Mutex
 	prev map[string]dockerCPUPrev
+
+	// hostMemTotal is what Docker reports as the machine's memory. A container
+	// with no memory limit is handed that number as its limit, so it is the test
+	// for "this limit is not really a limit" — without it every unlimited
+	// container would appear to be a fixed fraction of the way to being killed.
+	hostMemTotal uint64
 }
 
 func (c *CPUCollector) ID() string { return "docker.cpu" }
@@ -37,10 +43,17 @@ func (c *CPUCollector) Collect(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
 
-	containers, err := c.listContainers(ctx, c.maxContainers)
+	c.ensureHostMemTotal(ctx)
+
+	// One listing covers both jobs. Asking twice cost an extra request every
+	// round and was not atomic: a container that stopped between the two calls
+	// was counted as running and then reported no statistics at all.
+	all, err := c.listContainers(ctx, c.maxContainers, true)
 	if err != nil {
 		return fmt.Errorf("list containers: %w", err)
 	}
+
+	containers := c.publishContainerStates(all)
 	if len(containers) == 0 {
 		c.mu.Lock()
 		for k := range c.prev {
@@ -95,6 +108,68 @@ sendLoop:
 	return nil
 }
 
+// publishContainerStates reports every container the daemon knows about, running
+// or not, and returns the running ones for the per-container pass. It is the only
+// place a crashed container is visible: the per-service metrics are read from
+// live statistics, so a container that stopped simply vanishes from them and its
+// chart would otherwise hold the last healthy value it published forever.
+// Reporting from the full list means a stopped container keeps reporting zero —
+// and a container that was genuinely removed stops reporting altogether, which is
+// the difference an alert needs.
+func (c *CPUCollector) publishContainerStates(all []dockerContainerSummary) []dockerContainerSummary {
+	running := make([]dockerContainerSummary, 0, len(all))
+	counts := map[string]int{
+		"running":    0,
+		"exited":     0,
+		"restarting": 0,
+		"paused":     0,
+		"created":    0,
+		"dead":       0,
+	}
+	for _, ctr := range all {
+		state := strings.ToLower(strings.TrimSpace(ctr.State))
+		if state == "" {
+			continue
+		}
+		if _, known := counts[state]; !known {
+			state = "other"
+		}
+		counts[state]++
+
+		if state == "running" {
+			running = append(running, ctr)
+		}
+
+		if label := c.containerLabelValue(ctr); label != "" {
+			up := 0.0
+			if state == "running" {
+				up = 1
+			}
+			prostometrics.ValueSparse("docker.container.up", up, prostometrics.Label(c.labelKey, label))
+		}
+	}
+	for state, n := range counts {
+		prostometrics.ValueSparse("docker.containers_count", float64(n), prostometrics.Label("state", state))
+	}
+	return running
+}
+
+// ensureHostMemTotal keeps trying until the daemon answers. Reading it once and
+// giving up would be enough to break memory-limit reporting for the life of the
+// process: the agent and the daemon are both boot-time services, so a first
+// attempt landing before the daemon is ready is ordinary, and without the host
+// total every container looks as though it has a real memory limit.
+func (c *CPUCollector) ensureHostMemTotal(ctx context.Context) {
+	if c.hostMemTotal > 0 {
+		return
+	}
+	var out dockerInfo
+	if err := c.doJSON(ctx, http.MethodGet, "/info", &out); err != nil {
+		return
+	}
+	c.hostMemTotal = out.MemTotal
+}
+
 func newCPUCollector(sockPath string, every time.Duration, labelMode string, maxContainers, concurrency int, timeout time.Duration) (*CPUCollector, error) {
 	if strings.TrimSpace(sockPath) == "" {
 		return nil, errors.New("empty docker socket path")
@@ -144,8 +219,12 @@ func parseDockerLabelMode(s string) (dockerLabelMode, string, error) {
 	}
 }
 
-func (c *CPUCollector) listContainers(ctx context.Context, limit int) ([]dockerContainerSummary, error) {
-	p := fmt.Sprintf("/containers/json?all=0&limit=%d&size=0", limit)
+func (c *CPUCollector) listContainers(ctx context.Context, limit int, all bool) ([]dockerContainerSummary, error) {
+	allFlag := 0
+	if all {
+		allFlag = 1
+	}
+	p := fmt.Sprintf("/containers/json?all=%d&limit=%d&size=0", allFlag, limit)
 	var out []dockerContainerSummary
 	if err := c.doJSON(ctx, http.MethodGet, p, &out); err != nil {
 		return nil, err
@@ -169,7 +248,7 @@ func (c *CPUCollector) collectContainer(ctx context.Context, ctr dockerContainer
 		return
 	}
 
-	restartCount, hasRestart := c.getRestartCount(ctx, ctr.ID)
+	info, hasInfo := c.inspect(ctx, ctr.ID)
 
 	if usage := stats.MemoryStats.Usage; usage > 0 {
 		prostometrics.ValueSparse("docker.container.mem.usage_kb", float64(usage)/1024.0,
@@ -177,10 +256,47 @@ func (c *CPUCollector) collectContainer(ctx context.Context, ctr dockerContainer
 		)
 	}
 
-	if hasRestart {
+	// A container with no memory limit is handed the host's memory as its limit,
+	// which would read as a fixed, meaningless share. Only a real limit is
+	// reported, and only then is the share of it worth computing — that share is
+	// the number that says how close this container is to being killed.
+	if limit := stats.MemoryStats.Limit; limit > 0 && c.isRealMemoryLimit(limit) {
+		prostometrics.ValueSparse("docker.container.mem.limit_kb", float64(limit)/1024.0,
+			targetLabel,
+		)
+		if working := stats.MemoryStats.workingSet(); working > 0 {
+			pct := 100.0 * float64(working) / float64(limit)
+			if pct > 100 {
+				pct = 100
+			}
+			prostometrics.Value("docker.container.mem.limit_used_pct", pct, targetLabel)
+		}
+	}
+
+	if hasInfo {
+		restartCount := info.RestartCount
+		if restartCount == 0 {
+			restartCount = info.State.RestartCount
+		}
 		prostometrics.Total("docker.container.restart_count", float64(restartCount),
 			targetLabel,
 		)
+
+		// A health check that exists and is failing is the earliest signal a
+		// service is broken while its process is still alive.
+		if info.State.Health != nil {
+			healthy := 0.0
+			if strings.EqualFold(info.State.Health.Status, "healthy") {
+				healthy = 1
+			}
+			prostometrics.ValueSparse("docker.container.healthy", healthy, targetLabel)
+		}
+
+		oomKilled := 0.0
+		if info.State.OOMKilled {
+			oomKilled = 1
+		}
+		prostometrics.ValueSparse("docker.container.oom_killed", oomKilled, targetLabel)
 	}
 
 	if len(stats.Networks) > 0 {
@@ -214,12 +330,31 @@ func (c *CPUCollector) collectContainer(ctx context.Context, ctr dockerContainer
 		online = 1
 	}
 
+	throttling := stats.CPUStats.ThrottlingData
+
 	c.mu.Lock()
 	prev, ok := c.prev[ctr.ID]
-	c.prev[ctr.ID] = dockerCPUPrev{totalUsage: total, systemUsage: system}
+	c.prev[ctr.ID] = dockerCPUPrev{
+		totalUsage:       total,
+		systemUsage:      system,
+		periods:          throttling.Periods,
+		throttledPeriods: throttling.ThrottledPeriods,
+	}
 	c.mu.Unlock()
 	if !ok {
 		return
+	}
+
+	// The share of scheduling periods in which the container was stopped for
+	// having used its quota. Zero is the healthy reading and is reported, so a
+	// container that starts being throttled shows a line leaving the floor.
+	if periods := diffUint(prev.periods, throttling.Periods); periods > 0 {
+		throttled := diffUint(prev.throttledPeriods, throttling.ThrottledPeriods)
+		pct := 100.0 * float64(throttled) / float64(periods)
+		if pct > 100 {
+			pct = 100
+		}
+		prostometrics.Value("docker.container.cpu.throttled_pct", pct, targetLabel)
 	}
 
 	cpuDelta := diffUint(prev.totalUsage, total)
@@ -267,16 +402,23 @@ func (c *CPUCollector) getStats(ctx context.Context, containerID string) (*docke
 	return &out, nil
 }
 
-func (c *CPUCollector) getRestartCount(ctx context.Context, containerID string) (uint64, bool) {
+func (c *CPUCollector) inspect(ctx context.Context, containerID string) (dockerContainerInfo, bool) {
 	p := fmt.Sprintf("/containers/%s/json?size=0", url.PathEscape(containerID))
 	var out dockerContainerInfo
 	if err := c.doJSON(ctx, http.MethodGet, p, &out); err != nil {
-		return 0, false
+		return dockerContainerInfo{}, false
 	}
-	if out.RestartCount > 0 {
-		return out.RestartCount, true
+	return out, true
+}
+
+// isRealMemoryLimit rejects the host's own memory, which Docker reports as the
+// limit of an unconstrained container. The comparison is approximate because the
+// two numbers are read from different places and can differ by a page or two.
+func (c *CPUCollector) isRealMemoryLimit(limit uint64) bool {
+	if c.hostMemTotal == 0 {
+		return true
 	}
-	return out.State.RestartCount, true
+	return limit < c.hostMemTotal-c.hostMemTotal/100
 }
 
 func (c *CPUCollector) doJSON(ctx context.Context, method, path string, dst any) error {
