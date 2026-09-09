@@ -360,7 +360,7 @@ read_masked_api_key() {
 
 prompt_api_key_from_tty() {
   local key='' status=0
-  local prompt='prostometrics-install: 👋🏻 Paste here the API key you generated on the /settings page: '
+  local prompt='prostometrics-install: 👋 Paste here the API key you generated on the /settings page: '
   [ -r /dev/tty ] || return 1
   [ -w /dev/tty ] || return 1
 
