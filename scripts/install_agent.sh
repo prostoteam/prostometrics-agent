@@ -251,13 +251,130 @@ verify_api_key_or_fail() {
   err "could not verify API key: probe returned HTTP ${status}"
 }
 
+# True once the buffer holds a whole API key: the numeric client id, an
+# underscore, the `pk_` marker if it is a public key, and the 43-character
+# base64url token the /settings page generates. Recognising the finished shape is
+# what lets the prompt below go on by itself, so a pasted key does not have to be
+# followed by Enter.
+#
+# The marker is tested on its own because it is made of token characters, so a
+# public key would otherwise look finished three characters early and be accepted
+# truncated.
+api_key_looks_complete() {
+  local key="$1"
+  if [[ $key =~ ^[0-9]+_pk_[A-Za-z0-9_-]{43}$ ]]; then
+    return 0
+  fi
+  if [[ $key =~ ^[0-9]+_pk_ ]]; then
+    return 1
+  fi
+  [[ $key =~ ^[0-9]+_[A-Za-z0-9_-]{43}$ ]]
+}
+
+# Reads the API key from the terminal a character at a time, printing one star
+# per character so the paste is visibly received without the key ever reaching
+# the screen, and returning the moment the key is complete.
+#
+# Enter still submits. It is the way out for anything this cannot recognise -- an
+# older key, or a key shape that changes after this script ships -- so the prompt
+# can never sit waiting for a character that will not arrive.
+#
+# The prompt is printed here rather than by the caller so that it appears only
+# once the terminal has stopped echoing: a key pasted the instant the prompt
+# lands would otherwise be written to the screen before the read begins.
+#
+# Returns 2 when the terminal cannot be put into character-at-a-time mode, which
+# tells the caller to fall back to a plain line read.
+read_masked_api_key() {
+  local dest_var="$1" prompt="$2"
+  local buffer='' char='' escape=0 saved_tty=''
+
+  have_cmd stty || return 2
+  saved_tty="$(stty -g < /dev/tty 2>/dev/null)" || return 2
+  # -icanon with min 1 hands over each keystroke as it arrives instead of a line
+  # at a time, and -echo keeps the key off the screen for the whole read rather
+  # than per character, so a fast paste cannot slip through between two reads.
+  stty -echo -icanon min 1 time 0 < /dev/tty 2>/dev/null || return 2
+
+  printf '%s' "$prompt" > /dev/tty
+
+  while IFS= read -r -n 1 char < /dev/tty; do
+    # A terminal that still has bracketed paste enabled wraps pasted text in
+    # escape sequences. Swallow them whole: they are not key material, and a
+    # star for each of their bytes would misreport how much was pasted.
+    if [ "$escape" -eq 1 ]; then
+      case "$char" in
+        '['|'O') escape=2 ;;
+        *) escape=0 ;;
+      esac
+      continue
+    fi
+    if [ "$escape" -eq 2 ]; then
+      case "$char" in
+        [0-9]|';'|'?') ;;
+        *) escape=0 ;;
+      esac
+      continue
+    fi
+
+    case "$char" in
+      ''|$'\r')
+        # An empty read is the newline: Enter was pressed.
+        break
+        ;;
+      $'\e')
+        escape=1
+        ;;
+      $'\177'|$'\b')
+        if [ -n "$buffer" ]; then
+          buffer="${buffer%?}"
+          printf '\b \b' > /dev/tty
+        fi
+        ;;
+      ' '|$'\t')
+        # A hand-copied key often carries stray spaces; a key never contains one.
+        ;;
+      [[:print:]])
+        buffer="$buffer$char"
+        printf '*' > /dev/tty
+        if api_key_looks_complete "$buffer"; then
+          break
+        fi
+        ;;
+    esac
+  done
+
+  # A pasted key usually carries the newline that ended the copied line, and a
+  # terminal with bracketed paste on adds its closing marker after that. Neither
+  # is part of the key, and whatever is left in the terminal buffer is handed to
+  # the next reader -- including the shell this installer returns to. min 0/time 1
+  # makes the read give up after a tenth of a second when nothing is waiting.
+  stty min 0 time 1 < /dev/tty 2>/dev/null || true
+  while [ "$(dd bs=16 count=1 < /dev/tty 2>/dev/null | wc -c | tr -d '[:space:]')" -gt 0 ]; do :; done
+
+  stty "$saved_tty" < /dev/tty 2>/dev/null || true
+
+  printf -v "$dest_var" '%s' "$buffer"
+  [ -n "$buffer" ]
+}
+
 prompt_api_key_from_tty() {
-  local key
+  local key='' status=0
+  local prompt='prostometrics-install: 👋🏻 Paste here the API key you generated on the /settings page: '
   [ -r /dev/tty ] || return 1
   [ -w /dev/tty ] || return 1
-  printf "prostometrics-install: 👋🏻 Paste here the API key you generated on the /settings page:" > /dev/tty
-  IFS= read -r -s key < /dev/tty || return 1
-  printf "\n" > /dev/tty
+
+  read_masked_api_key key "$prompt" || status=$?
+  if [ "$status" -eq 2 ]; then
+    # Nothing here can hand over single keystrokes: ask the plain way instead,
+    # unechoed and ended by Enter.
+    printf '%s' "$prompt" > /dev/tty
+    IFS= read -r -s key < /dev/tty || return 1
+    status=0
+  fi
+  [ "$status" -eq 0 ] || return 1
+
+  printf '\n' > /dev/tty
   PROSTOMETRICS_API_KEY="$key"
   return 0
 }
