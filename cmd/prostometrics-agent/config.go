@@ -130,6 +130,14 @@ type nginxConfig struct {
 	// TimeSamplesPerTick bounds how many response times are reported each round,
 	// which is what keeps a busy site's cost flat instead of proportional to traffic.
 	TimeSamplesPerTick int `yaml:"time_samples_per_tick"`
+	// TopLists adds ranked lists of pages, failing pages and referring sites.
+	// Off unless asked for: unlike everything else the agent sends, their cost
+	// grows with the site's traffic, because counting different visitors cannot
+	// be done from a total.
+	TopLists bool `yaml:"top_lists"`
+	// SiteHost is this site's own address, kept out of the referrer list so the
+	// rows are the sites sending traffic rather than the site receiving it.
+	SiteHost string `yaml:"site_host"`
 }
 
 type runtimeConfig struct {
@@ -142,6 +150,8 @@ type runtimeConfig struct {
 	NginxAccessLogEnabled bool
 	NginxAccessLogPath    string
 	NginxTimeSamples      int
+	NginxTopLists         bool
+	NginxSiteHost         string
 
 	PostgresEnabled   bool
 	PostgresInstances []postgres.Instance
@@ -307,6 +317,8 @@ func resolveRuntimeConfig(cfg *fileConfig, workloadFlag string, workloadFlagSet 
 			out.NginxAccessLogEnabled = true
 			out.NginxAccessLogPath = path
 			out.NginxTimeSamples = cfg.Integrations.Nginx.TimeSamplesPerTick
+			out.NginxTopLists = cfg.Integrations.Nginx.TopLists
+			out.NginxSiteHost = strings.TrimSpace(cfg.Integrations.Nginx.SiteHost)
 		}
 	}
 

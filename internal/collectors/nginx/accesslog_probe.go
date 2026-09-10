@@ -14,16 +14,16 @@ import (
 // The agent usually runs as root through systemd, but a user install will not be
 // able to open it, and that must be a quiet skip rather than a repeating failure.
 type AccessLogProbe struct {
-	path       string
-	every      time.Duration
-	maxSamples int
+	path  string
+	every time.Duration
+	opts  AccessLogOptions
 }
 
-func NewAccessLogProbe(path string, every time.Duration, maxSamples int) *AccessLogProbe {
+func NewAccessLogProbe(path string, every time.Duration, opts AccessLogOptions) *AccessLogProbe {
 	if strings.TrimSpace(path) == "" {
 		path = DefaultAccessLogPath
 	}
-	return &AccessLogProbe{path: path, every: every, maxSamples: maxSamples}
+	return &AccessLogProbe{path: path, every: every, opts: opts}
 }
 
 func (p *AccessLogProbe) ID() string { return "nginx.accesslog" }
@@ -46,5 +46,5 @@ func (p *AccessLogProbe) Detect(_ context.Context) (bool, string) {
 }
 
 func (p *AccessLogProbe) New() agent.Collector {
-	return NewAccessLogCollector(p.path, p.every, p.maxSamples)
+	return NewAccessLogCollector(p.path, p.every, p.opts)
 }

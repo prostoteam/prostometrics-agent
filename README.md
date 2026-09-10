@@ -34,6 +34,7 @@ repeating failure.
 | systemd | the host was booted by systemd and `systemctl` is runnable |
 | Nginx status | a `stub_status` endpoint answers |
 | Nginx access log | `/var/log/nginx/access.log` is readable |
+| Nginx ranked lists | `top_lists` is switched on for nginx |
 | MongoDB, PostgreSQL, MySQL, Redis, RabbitMQ | instances are configured |
 | Prometheus scrape, commands | targets are configured |
 
@@ -61,6 +62,10 @@ integrations:
     enabled: true
     endpoint: "http://127.0.0.1/stub_status"
     access_log: "/var/log/nginx/access.log"
+    # Ranked lists of pages, failing pages and referring sites. Off by default:
+    # see the collector reference for what they cost.
+    top_lists: true
+    site_host: "example.com"
 
   postgres:
     instances:
@@ -127,6 +132,7 @@ integrations:
 | `nginx.totals` | counter | `type` |
 | `nginx.requests_count` | counter | `class` |
 | `nginx.request_time_ms`, `nginx.upstream_time_ms` | value | |
+| `nginx.pages`, `nginx.error_pages`, `nginx.referrers` | top | |
 | `postgres.*`, `mysql.*`, `redis.*`, `mongo.*` | mixed | `instance`, plus metric-specific labels |
 | `rabbitmq.*` | mixed | `instance`, plus `queue`, `type` or `state` |
 

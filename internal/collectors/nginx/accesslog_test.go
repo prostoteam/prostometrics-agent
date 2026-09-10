@@ -80,6 +80,60 @@ func TestParseAccessLogLineRejectsNonRequests(t *testing.T) {
 	}
 }
 
+// The ranked lists need to know who asked for what, which the counts and times
+// never did. Both are on the same line the parser already walks.
+func TestParseAccessLogLineReadsWhoAskedForWhat(t *testing.T) {
+	line := `10.0.0.1 - - [08/Sep/2026:10:00:00 +0000] "GET /orders?id=7 HTTP/1.1" 502 1234 "https://news.example.com/x" "curl/8.0"`
+	entry, ok := parseAccessLogLine(line)
+	if !ok {
+		t.Fatal("expected the line to parse")
+	}
+	if entry.remoteAddr != "10.0.0.1" {
+		t.Fatalf("remoteAddr = %q", entry.remoteAddr)
+	}
+	if entry.target != "/orders?id=7" {
+		t.Fatalf("target = %q", entry.target)
+	}
+	if entry.referrer != "https://news.example.com/x" {
+		t.Fatalf("referrer = %q", entry.referrer)
+	}
+	if entry.status != 502 {
+		t.Fatalf("status = %d", entry.status)
+	}
+}
+
+// Only the combined format puts the referrer where it is looked for, so a field
+// that is not a URL has to be left alone rather than ranked as a site. Without
+// this, a format whose next quoted field is the user agent would fill the
+// referrer list with browser names.
+func TestParseAccessLogLineTakesOnlyAURLAsTheReferrer(t *testing.T) {
+	for _, line := range []string{
+		`10.0.0.1 - - [08/Sep/2026:10:00:00 +0000] "GET / HTTP/1.1" 200 12 "-" "curl/8.0"`,
+		`10.0.0.1 - - [08/Sep/2026:10:00:00 +0000] "GET / HTTP/1.1" 200 12 "Mozilla/5.0" "example.com"`,
+	} {
+		entry, ok := parseAccessLogLine(line)
+		if !ok {
+			t.Fatalf("expected %q to parse", line)
+		}
+		if entry.referrer != "" {
+			t.Fatalf("referrer = %q, want nothing", entry.referrer)
+		}
+	}
+}
+
+// A request line nginx could not parse is logged whole, and naming a page from
+// it would invent one.
+func TestParseAccessLogLineNamesNoPageForAMalformedRequest(t *testing.T) {
+	line := `10.0.0.1 - - [08/Sep/2026:10:00:00 +0000] "MGLNDD_1_2" 400 150 "-" "-"`
+	entry, ok := parseAccessLogLine(line)
+	if !ok {
+		t.Fatal("expected the line to parse")
+	}
+	if entry.target != "" {
+		t.Fatalf("target = %q, want nothing", entry.target)
+	}
+}
+
 // A first open must skip existing history: an agent restart otherwise replays
 // every request already in the file as if it had just happened.
 func TestLogTailStartsAtTheEndThenFollows(t *testing.T) {

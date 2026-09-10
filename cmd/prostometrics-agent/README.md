@@ -114,6 +114,9 @@ line returns to the floor instead of staying frozen at its last failing value.
 | `nginx.requests_count` | count | count | `class` (1xx,2xx,3xx,4xx,5xx) |
 | `nginx.request_time_ms` | value | ms | |
 | `nginx.upstream_time_ms` | value | ms | |
+| `nginx.pages` | top | visitors | |
+| `nginx.error_pages` | top | visitors | |
+| `nginx.referrers` | top | visitors | |
 
 The status page requires a reachable `stub_status` endpoint and is enabled by default unless explicitly disabled. You
 can configure the endpoint explicitly or let the agent look for a local status page.
@@ -137,6 +140,55 @@ access_log /var/log/nginx/access.log timed;
 Response times are sampled rather than sent one per request: `time_samples_per_tick` (default 20) bounds how many are
 reported each round. Percentiles are computed by the product from those samples, so a busy site's cost stays flat
 instead of growing with its traffic.
+
+### Ranked lists
+
+`top_lists: true` adds three lists, each ranking its rows by how many different visitors drew them rather than by how
+many requests arrived, so one person reloading a page fifty times does not put it at the top:
+
+- `nginx.pages` — the pages people read. Stylesheets, scripts, fonts, images, media and source maps are left out:
+  every visit fetches the same few of them, so they would outrank every article on the site.
+- `nginx.error_pages` — the pages that failed, each row named by the status it returned: `502 /orders/:id`. A page
+  answering 404 to one visitor and 502 to another is two problems and reads as two rows. A missing script or image
+  does appear here, unlike a working one: a broken asset is worth seeing and is not fetched by every visit anyway.
+- `nginx.referrers` — the sites visitors arrived from, reduced to the site itself; a leading `www.` is dropped so one
+  site is one row.
+
+They are off by default because they are the only thing the agent sends whose volume follows the site's traffic, and
+the service bills per accepted event. The counts and times above cost a fixed handful of events per tick however busy
+the site is: a counter reported ten thousand times in one batch is summed into a single event before it leaves the
+machine. A ranked list cannot be folded that way, because counting different visitors is impossible from a total. The
+client does drop a repeat of the same visitor on the same row within one batch, so a person reloading a page costs one
+event rather than ten — how much that collapses depends on how many events the installed client puts in a batch, which
+is a property of the client release rather than of the agent. Plan on close to one event per request.
+
+At most 5000 requests per tick are ranked. Past that the rest of the tick is not ranked at all, which bounds both the
+bill and what the agent can push at the client in one round: the counts and times are reported first and the ranked
+rows last, so a queue too full to take everything drops the ranked rows rather than the numbers a host already had.
+
+On a quiet site that is nothing. On a site serving a hundred requests a second it is a few million events a day, which
+is a real line on the bill and worth deciding deliberately. What the service stores does not grow with it — each list
+holds a fixed number of rows however many pages a site has.
+
+Three things shape what the rows say:
+
+- **Visitor identity.** The client address is hashed on the host and never sent. Behind a CDN or a load balancer every
+  request arrives from the proxy, so enable nginx's `ngx_http_realip_module` (`set_real_ip_from` plus `real_ip_header`)
+  or every visitor will look like the same handful of people.
+- **Page names.** A path segment that names one record becomes `:id`, so `/orders/41` and `/orders/9002` share a row.
+  Numbers, dashed UUIDs and long runs of hex are recognised; slugs are deliberately left alone, because
+  `/guides/how-to-instrument-a-service` is a page. Query strings are dropped.
+- **Your own site.** Set `site_host` to the site's own address to keep it out of the referrer list. Without it, a
+  visitor moving from one of your pages to the next counts as a referral and your own domain tops the list.
+- **What counts as a failure.** `nginx.error_pages` leaves out the statuses that arrive from many addresses without
+  the site being broken: 401 and 403, which an auth-gated app answers to every logged-out poll; 499, which nginx logs
+  whenever a visitor closes a tab mid-load; and 404 on a page, which is overwhelmingly scanners working through a list
+  of addresses that never existed. A 404 on a *file* is kept: a browser only asks for a file the page it just loaded
+  named, so that one is a deployment that shipped half of itself.
+
+The referrer list needs a format that carries `$http_referer`, which `combined` does. It is read from the first quoted
+field after the request, and a field that is not a URL is ignored, so a custom format that puts something else there
+reports nothing rather than reporting nonsense.
 
 ## PostgreSQL
 

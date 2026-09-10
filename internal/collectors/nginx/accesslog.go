@@ -32,6 +32,18 @@ const (
 	defaultTimeSamples = 20
 
 	maxLineBytes = 64 << 10
+
+	// maxRankedRowsPerTick bounds what the ranked lists offer the client in one
+	// round. Counts and times cost a fixed handful of events however busy the
+	// site is, but a ranked list cannot be summarised that way and costs one
+	// event per request -- and a catch-up tick reads up to maxBytesPerTick,
+	// tens of thousands of lines. Unbounded, that fills the client's queue,
+	// which then drops whatever is offered next.
+	//
+	// Trimming the tail of a tick is the right loss to take: the rows that
+	// matter are the ones many people touched, and a row popular enough to rank
+	// appears throughout the tick rather than only at its end.
+	maxRankedRowsPerTick = 5000
 )
 
 // AccessLogCollector turns the access log into request counts by status class and
@@ -42,14 +54,36 @@ type AccessLogCollector struct {
 	every      time.Duration
 	path       string
 	maxSamples int
+	topLists   bool
+	siteHost   string
 	rand       *rand.Rand
 	reader     *logTail
 }
 
-func NewAccessLogCollector(path string, every time.Duration, maxSamples int) *AccessLogCollector {
+// AccessLogOptions carries what is not the same on every host. Its zero value
+// reads the log the way it has always been read: counts and times, and nothing
+// that depends on who made a request.
+type AccessLogOptions struct {
+	// MaxSamples bounds how many response times are reported each tick.
+	MaxSamples int
+
+	// TopLists turns on the ranked lists of pages, failing pages and referring
+	// sites. They cost one event per request rather than the fixed handful per
+	// tick everything else here costs, which is why a host asks for them
+	// instead of getting them by default.
+	TopLists bool
+
+	// SiteHost, when set, is kept out of the referrer list. A visitor clicking
+	// from one of your own pages to the next is not a site sending you traffic,
+	// and would otherwise be the top row every time.
+	SiteHost string
+}
+
+func NewAccessLogCollector(path string, every time.Duration, opts AccessLogOptions) *AccessLogCollector {
 	if strings.TrimSpace(path) == "" {
 		path = DefaultAccessLogPath
 	}
+	maxSamples := opts.MaxSamples
 	if maxSamples <= 0 {
 		maxSamples = defaultTimeSamples
 	}
@@ -57,6 +91,8 @@ func NewAccessLogCollector(path string, every time.Duration, maxSamples int) *Ac
 		every:      every,
 		path:       path,
 		maxSamples: maxSamples,
+		topLists:   opts.TopLists,
+		siteHost:   referrerSite(strings.TrimSpace(opts.SiteHost)),
 		rand:       rand.New(rand.NewSource(time.Now().UnixNano())),
 		reader:     newLogTail(path),
 	}
@@ -78,12 +114,27 @@ func (c *AccessLogCollector) Collect(_ context.Context) error {
 	requestTimes := newReservoir(c.maxSamples)
 	upstreamTimes := newReservoir(c.maxSamples)
 
+	// Parsed once and kept, because the ranked lists are reported after the
+	// counts and times below rather than during this pass. The client's queue
+	// drops what it cannot hold, and a catch-up tick can offer it tens of
+	// thousands of ranked-list events -- so whatever is enqueued last is what
+	// gets dropped. The counts and times are the metrics a host had before it
+	// switched the lists on, and turning an opt-in feature on must not take
+	// them away.
+	var ranked []accessLogEntry
+	if c.topLists {
+		ranked = make([]accessLogEntry, 0, min(len(lines), maxRankedRowsPerTick))
+	}
+
 	for _, line := range lines {
 		entry, ok := parseAccessLogLine(line)
 		if !ok {
 			continue
 		}
 		classCounts[entry.statusClass]++
+		if c.topLists && len(ranked) < maxRankedRowsPerTick {
+			ranked = append(ranked, entry)
+		}
 		if entry.hasRequestTime {
 			requestTimes.offer(c.rand, entry.requestTimeSec)
 		}
@@ -110,6 +161,12 @@ func (c *AccessLogCollector) Collect(_ context.Context) error {
 	}
 	for _, sec := range upstreamTimes.samples {
 		prostometrics.Value("nginx.upstream_time_ms", sec*1000.0)
+	}
+
+	// Last, so that a queue too full to take them has already taken everything
+	// above.
+	for _, entry := range ranked {
+		c.recordRankedRows(entry)
 	}
 
 	return nil
@@ -146,10 +203,17 @@ func (s *reservoir) offer(r *rand.Rand, v float64) {
 
 type accessLogEntry struct {
 	statusClass     string
+	status          int
 	requestTimeSec  float64
 	upstreamTimeSec float64
 	hasRequestTime  bool
 	hasUpstreamTime bool
+
+	// Read only by the ranked lists, and empty on a format that does not carry
+	// them. Reporting counts and times never needs to know who asked for what.
+	remoteAddr string
+	target     string
+	referrer   string
 }
 
 // parseAccessLogLine reads the combined format every default nginx install
@@ -176,7 +240,13 @@ func parseAccessLogLine(line string) (accessLogEntry, bool) {
 		return accessLogEntry{}, false
 	}
 
-	entry := accessLogEntry{statusClass: fmt.Sprintf("%dxx", status/100)}
+	entry := accessLogEntry{
+		statusClass: fmt.Sprintf("%dxx", status/100),
+		status:      status,
+		remoteAddr:  leadingField(line[:start]),
+		target:      requestTarget(line[start+1 : start+1+end]),
+		referrer:    quotedReferrer(rest),
+	}
 
 	// Named forms first: a format carrying rt=/urt= says exactly which is which.
 	for _, field := range fields {
@@ -226,6 +296,50 @@ func parseAccessLogLine(line string) (accessLogEntry, bool) {
 	}
 
 	return entry, true
+}
+
+// leadingField is the line's opening field, which every format in common use
+// starts with the client address.
+func leadingField(prefix string) string {
+	fields := strings.Fields(prefix)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// requestTarget picks what was asked for out of a request line, which reads
+// "GET /orders?id=7 HTTP/1.1". A request nginx could not parse is logged whole,
+// so a line that is not shaped like a request names nothing rather than being
+// guessed at.
+func requestTarget(request string) string {
+	fields := strings.Fields(request)
+	if len(fields) < 2 {
+		return ""
+	}
+	return fields[1]
+}
+
+// quotedReferrer reads the first quoted field after the request, which is where
+// the combined format puts the referring page. A format that puts something
+// else there is excluded by requiring a URL: a user agent, a host and nginx's
+// own "-" for no referrer never parse as one.
+func quotedReferrer(rest string) string {
+	open := strings.IndexByte(rest, '"')
+	if open < 0 {
+		return ""
+	}
+	shut := strings.IndexByte(rest[open+1:], '"')
+	if shut < 0 {
+		return ""
+	}
+	value := rest[open+1 : open+1+shut]
+	if !strings.HasPrefix(value, "http://") &&
+		!strings.HasPrefix(value, "https://") &&
+		!strings.HasPrefix(value, "//") {
+		return ""
+	}
+	return value
 }
 
 // logTail follows a file across rotation. Identity is the inode rather than the

@@ -17,6 +17,48 @@ func TestResolveRuntimeConfigDefaults(t *testing.T) {
 	}
 }
 
+// The ranked lists are the only thing the agent sends whose volume follows the
+// site's traffic, so a host that did not ask for them must not get them --
+// including the host that has no configuration file at all.
+func TestResolveRuntimeConfigLeavesRankedListsOffUnlessAskedFor(t *testing.T) {
+	cfg, err := resolveRuntimeConfig(nil, "api-host", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.NginxAccessLogEnabled {
+		t.Fatal("the access log should still be read by default")
+	}
+	if cfg.NginxTopLists {
+		t.Fatal("ranked lists were on for a host with no configuration")
+	}
+
+	empty := &fileConfig{}
+	cfg, err = resolveRuntimeConfig(empty, "api-host", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NginxTopLists {
+		t.Fatal("ranked lists were on for a configuration that never mentions them")
+	}
+}
+
+func TestResolveRuntimeConfigCarriesTheRankedListSettings(t *testing.T) {
+	cfg := &fileConfig{}
+	cfg.Integrations.Nginx.TopLists = true
+	cfg.Integrations.Nginx.SiteHost = "  example.com  "
+
+	out, err := resolveRuntimeConfig(cfg, "api-host", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.NginxTopLists {
+		t.Fatal("top_lists: true did not reach the collector")
+	}
+	if out.NginxSiteHost != "example.com" {
+		t.Fatalf("NginxSiteHost = %q", out.NginxSiteHost)
+	}
+}
+
 func TestLoadFileConfigExpandsEnvFile(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, "agent.env")

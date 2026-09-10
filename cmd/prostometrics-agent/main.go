@@ -96,7 +96,11 @@ func main() {
 	}
 	if runtimeCfg.NginxAccessLogEnabled {
 		probes = append(probes, nginx.NewAccessLogProbe(
-			runtimeCfg.NginxAccessLogPath, agent.NginxLogEvery, runtimeCfg.NginxTimeSamples))
+			runtimeCfg.NginxAccessLogPath, agent.NginxLogEvery, nginx.AccessLogOptions{
+				MaxSamples: runtimeCfg.NginxTimeSamples,
+				TopLists:   runtimeCfg.NginxTopLists,
+				SiteHost:   runtimeCfg.NginxSiteHost,
+			}))
 	}
 	if runtimeCfg.PostgresEnabled {
 		probes = append(probes, postgres.NewProbe(runtimeCfg.PostgresInstances, agent.PostgresEvery, integrationRetryInterval))
