@@ -109,7 +109,7 @@ integrations:
 | `host.pressure_pct` | value | `resource`, `kind` |
 | `host.mem.capacity_kb`, `host.swap.capacity_kb` | value | `type` |
 | `host.swap_io_pages` | counter | `dir` |
-| `host.oom_kills`, `host.context_switches`, `host.interrupts`, `host.forks` | counter | |
+| `host.oom_kills` | counter | |
 | `host.page_faults` | counter | `type` |
 | `host.procs_count` | value | `state` |
 | `host.fd_count` | value | `type` |
