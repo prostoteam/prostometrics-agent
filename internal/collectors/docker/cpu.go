@@ -140,12 +140,11 @@ func (c *CPUCollector) publishContainerStates(all []dockerContainerSummary) []do
 			running = append(running, ctr)
 		}
 
+		// Reported as a success rate rather than a raw flag: the average of a
+		// bucket is then the share of the minute the container was up, which
+		// reads as a percentage instead of a line pinned to one.
 		if label := c.containerLabelValue(ctr); label != "" {
-			up := 0.0
-			if state == "running" {
-				up = 1
-			}
-			prostometrics.ValueSparse("docker.container.up", up, prostometrics.Label(c.labelKey, label))
+			prostometrics.Success("docker.container.up", state == "running", prostometrics.Label(c.labelKey, label))
 		}
 	}
 	for state, n := range counts {
@@ -283,13 +282,10 @@ func (c *CPUCollector) collectContainer(ctx context.Context, ctr dockerContainer
 		)
 
 		// A health check that exists and is failing is the earliest signal a
-		// service is broken while its process is still alive.
+		// service is broken while its process is still alive. Reported as a
+		// success rate for the same reason as docker.container.up.
 		if info.State.Health != nil {
-			healthy := 0.0
-			if strings.EqualFold(info.State.Health.Status, "healthy") {
-				healthy = 1
-			}
-			prostometrics.ValueSparse("docker.container.healthy", healthy, targetLabel)
+			prostometrics.Success("docker.container.healthy", strings.EqualFold(info.State.Health.Status, "healthy"), targetLabel)
 		}
 
 		oomKilled := 0.0

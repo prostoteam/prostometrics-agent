@@ -55,7 +55,9 @@ func (c *ProcsCollector) Collect(_ context.Context) error {
 
 	if used, max, err := readFileDescriptors(); err == nil {
 		prostometrics.ValueSparse("host.fd_count", float64(used), prostometrics.Label("type", "used"))
-		prostometrics.ValueSparse("host.fd_count", float64(max), prostometrics.Label("type", "max"))
+		if isRealFileMax(max) {
+			prostometrics.ValueSparse("host.fd_count", float64(max), prostometrics.Label("type", "max"))
+		}
 	}
 
 	return nil
@@ -141,6 +143,24 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// maxRealFileMax is the largest fs.file-max worth treating as a ceiling. Two
+// numbers bound it and both sit above this one. The kernel derives its own
+// default from memory -- roughly four hundred thousand descriptors per gigabyte
+// -- so only a host with terabytes of RAM computes anything near it. The client
+// refuses a value sample past about four hundred and thirty million, so a larger
+// reading never reaches the server anyway and is dropped with the metric named
+// in the agent's log once a minute.
+const maxRealFileMax = 400_000_000
+
+// isRealFileMax rejects a file-max that names no ceiling. systemd raises
+// fs.file-max to the largest value a signed 64-bit integer holds, so on a
+// current host the third field of /proc/sys/fs/file-nr reads as "no limit"
+// rather than as a limit. Charting it would put the used count against a line
+// nothing can approach, which says less than leaving the line out.
+func isRealFileMax(max uint64) bool {
+	return max > 0 && max <= maxRealFileMax
 }
 
 // readFileDescriptors reads "allocated unused max" from /proc/sys/fs/file-nr.
