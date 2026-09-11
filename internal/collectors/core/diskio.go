@@ -78,27 +78,14 @@ func (c *DiskIOCollector) Collect(_ context.Context) error {
 			deviceLabel,
 		)
 
-		prostometrics.ValueSparse("host.disk.io_queue", float64(cur.inFlight),
-			deviceLabel,
-		)
-
-		// How long an average request took, rather than how many there were. A
-		// device can be quiet and still slow, which byte and operation counts
-		// cannot show. Emitted only when the device did work in the interval,
-		// because dividing by zero requests reports nothing meaningful.
+		// How long an average request took, rather than how many there were. Read
+		// and write time are combined using their operation counts, so a quiet
+		// direction cannot weigh as much as the busy one. One series per device
+		// keeps the Host card readable without hiding a slow disk.
 		if hadPrev {
-			emitLatency := func(dirLabel string, prevOps, curOps, prevTime, curTime uint64) {
-				ops := diffUint(prevOps, curOps)
-				if ops == 0 {
-					return
-				}
-				elapsed := diffUint(prevTime, curTime)
-				prostometrics.Value("host.disk.io_latency_ms", float64(elapsed)/float64(ops),
-					deviceLabel, prostometrics.Label("dir", dirLabel),
-				)
+			if latency, ok := diskIOLatencyMs(prev, cur); ok {
+				prostometrics.Value("host.disk.io_latency_ms", latency, deviceLabel)
 			}
-			emitLatency("read", prev.readOps, cur.readOps, prev.readTimeMs, cur.readTimeMs)
-			emitLatency("write", prev.writeOps, cur.writeOps, prev.writeTimeMs, cur.writeTimeMs)
 		}
 	}
 
@@ -112,6 +99,15 @@ func (c *DiskIOCollector) Collect(_ context.Context) error {
 	return nil
 }
 
+func diskIOLatencyMs(prev, cur diskIOStats) (float64, bool) {
+	ops := diffUint(prev.readOps, cur.readOps) + diffUint(prev.writeOps, cur.writeOps)
+	if ops == 0 {
+		return 0, false
+	}
+	elapsed := diffUint(prev.readTimeMs, cur.readTimeMs) + diffUint(prev.writeTimeMs, cur.writeTimeMs)
+	return float64(elapsed) / float64(ops), true
+}
+
 type diskIOStats struct {
 	readBytes   uint64
 	writeBytes  uint64
@@ -120,7 +116,6 @@ type diskIOStats struct {
 	readTimeMs  uint64
 	writeTimeMs uint64
 	ioTimeMs    uint64
-	inFlight    uint64
 }
 
 func readDiskIOProc() (map[string]diskIOStats, error) {
@@ -148,7 +143,6 @@ func readDiskIOProc() (map[string]diskIOStats, error) {
 		writeCompleted, _ := parseUint(fields[7])
 		sectorsWritten, _ := parseUint(fields[9])
 		writeTimeMs, _ := parseUint(fields[10])
-		inFlight, _ := parseUint(fields[11])
 		timeInIOms, _ := parseUint(fields[12])
 
 		const sectorSize = 512
@@ -163,7 +157,6 @@ func readDiskIOProc() (map[string]diskIOStats, error) {
 			readTimeMs:  readTimeMs,
 			writeTimeMs: writeTimeMs,
 			ioTimeMs:    timeInIOms,
-			inFlight:    inFlight,
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -192,7 +185,6 @@ func readDiskIOGopsutil() (map[string]diskIOStats, error) {
 			readTimeMs:  s.ReadTime,
 			writeTimeMs: s.WriteTime,
 			ioTimeMs:    s.IoTime,
-			inFlight:    s.IopsInProgress,
 		}
 	}
 	return stats, nil

@@ -6,8 +6,7 @@ Collection cadence:
 - Every 10s: heartbeat, CPU, load, pressure, memory, swap, network, disk I/O, Docker, Nginx status and access log,
   MongoDB, PostgreSQL, MySQL, Redis
 - Every 30s: RabbitMQ, Prometheus targets
-- Every 60s: filesystem usage, inode counts, uptime, kernel counters, process and descriptor counts, network stack
-  counters, systemd units, commands
+- Every 60s: filesystem usage, inode counts, uptime, kernel counters, systemd units, commands
 
 Counter metrics are cumulative totals; only the delta between readings travels on the wire, so a counter that does
 not move costs nothing. A one-minute cadence therefore loses no events for a counter — it only changes how quickly
@@ -21,37 +20,23 @@ All metrics are sent with the configured workload scope; the tables list metric 
 |---|---|---|---|
 | `host.heartbeat` | count | count | |
 | `host.cpu.usage_pct` | value | percent | `cpu`, `mode` (user,nice,system,idle,iowait,irq,softirq,steal) |
-| `host.load_avg` | value | count | `window` (1m,5m,15m) |
 | `host.load_per_core` | value | count | `window` (1m,5m,15m) |
 | `host.pressure_pct` | value | percent | `resource` (cpu,memory,io), `kind` (some,full) |
 | `host.mem.capacity_kb` | value | KB | `type` (total,used,free,available) |
 | `host.swap.capacity_kb` | value | KB | `type` (total,used,free) |
 | `host.swap_io_pages` | count | pages | `dir` (in,out) |
 | `host.oom_kills` | count | count | |
-| `host.page_faults` | count | count | `type` (major,minor) |
-| `host.context_switches` | count | count | |
-| `host.interrupts` | count | count | |
-| `host.forks` | count | count | |
-| `host.procs_count` | value | count | `state` (running,sleeping,uninterruptible,zombie,stopped,idle,other,total,limit) |
-| `host.fd_count` | value | count | `type` (used,max) |
 | `host.uptime_min` | value | min | |
 | `host.fs.capacity_kb` | value | KB | `mount`, `device`, `type` (total,used,free) |
 | `host.fs.inodes_count` | value | count | `mount`, `device`, `type` (total,used,free) |
 | `host.disk.io_kb` | count | kb | `device`, `dir` (read,write) |
 | `host.disk.io_ops` | count | ops | `device`, `dir` (read,write) |
 | `host.disk.io_time_ms` | count | ms | `device` |
-| `host.disk.io_latency_ms` | value | ms | `device`, `dir` (read,write) |
-| `host.disk.io_queue` | value | count | `device` |
+| `host.disk.io_latency_ms` | value | ms | `device` |
 | `host.net.kb` | count | kb | `iface`, `dir` (rx,tx) |
 | `host.net.packets` | count | packets | `iface`, `dir` (rx,tx) |
 | `host.net.errors` | count | errors | `iface`, `dir` (rx,tx) |
 | `host.net.dropped` | count | packets | `iface`, `dir` (rx,tx) |
-| `host.tcp.retransmits` | count | segments | |
-| `host.tcp.errors` | count | count | `type` (in_errors,attempt_fails,estab_resets,out_resets,syn_retrans) |
-| `host.tcp.listen_drops` | count | count | `type` (overflows,drops) |
-| `host.tcp.sockets` | value | count | `state` (established,time_wait,orphan,allocated,in_use) |
-| `host.udp.errors` | count | count | `type` (in_errors,no_ports,rcvbuf_errors,sndbuf_errors) |
-| `host.conntrack` | value | count | `type` (used,max) |
 
 `host.heartbeat` exists so that a host going away is observable at all. Every other metric may legitimately fall
 silent — a disk is unmounted, an interface renamed, a container stopped — so none of them can tell "nothing to
@@ -61,8 +46,6 @@ the shipped alert read an empty bucket as a zero and fire on silence.
 `host.pressure_pct` reports Linux PSI, which measures time spent waiting rather than utilisation. A disk can be
 fully busy with nothing waiting on it, and a machine can be half idle while every request stalls; pressure is the
 reading that separates those. It needs Linux 4.20+ built with `CONFIG_PSI`, and the collector is skipped otherwise.
-
-`host.procs_count` walks `/proc` once a minute to count process states, which is why it runs at the slow cadence.
 
 ## Docker
 

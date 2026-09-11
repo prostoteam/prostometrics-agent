@@ -32,10 +32,6 @@ func IntegrationProbes() []agent.Probe {
 		core.NewPressureProbe(agent.CoreFastEvery),
 		core.NewFileProbe("kernel", []string{"/proc/vmstat"}, agent.CoreSlowEvery,
 			func(every time.Duration) agent.Collector { return core.NewKernel(every) }),
-		core.NewFileProbe("procs", []string{"/proc/sys/fs/file-nr"}, agent.CoreSlowEvery,
-			func(every time.Duration) agent.Collector { return core.NewProcs(every) }),
-		core.NewFileProbe("netstat", []string{"/proc/net/snmp"}, agent.CoreSlowEvery,
-			func(every time.Duration) agent.Collector { return core.NewNetStat(every) }),
 		systemd.NewProbe(agent.SystemdEvery),
 	}
 }

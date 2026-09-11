@@ -16,9 +16,9 @@ import (
 	prostometrics "github.com/prostoteam/prostometrics-go"
 )
 
-// LoadAvgCollector reports the run-queue averages. It emits them twice: raw, and
-// divided by the number of processors. Only the divided form is comparable
-// between machines, which is what a shipped alert threshold needs.
+// LoadAvgCollector reports run-queue averages divided by the number of
+// processors. The normalized form is comparable between machines, which is
+// what both the Host card and its shipped alert threshold need.
 type LoadAvgCollector struct {
 	every time.Duration
 	cpus  int
@@ -46,7 +46,6 @@ func (c *LoadAvgCollector) Collect(_ context.Context) error {
 		if v < 0 {
 			return
 		}
-		prostometrics.Value("host.load_avg", v, prostometrics.Label("window", window))
 		prostometrics.Value("host.load_per_core", v/float64(c.cpus), prostometrics.Label("window", window))
 	}
 	emit("1m", avg.load1)

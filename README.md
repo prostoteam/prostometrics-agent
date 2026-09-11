@@ -29,7 +29,7 @@ repeating failure.
 | Integration | Enabled when |
 |---|---|
 | Core host metrics | always |
-| Pressure, process, and network-stack metrics | the kernel exposes them (Linux; pressure needs 4.20+ with `CONFIG_PSI`) |
+| Pressure and kernel metrics | the kernel exposes them (Linux; pressure needs 4.20+ with `CONFIG_PSI`) |
 | Docker | `/var/run/docker.sock` is a reachable socket |
 | systemd | the host was booted by systemd and `systemctl` is runnable |
 | Nginx status | a `stub_status` endpoint answers |
@@ -105,25 +105,17 @@ integrations:
 |---|---|---|
 | `host.heartbeat` | counter | |
 | `host.cpu.usage_pct` | value | `cpu`, `mode` |
-| `host.load_avg`, `host.load_per_core` | value | `window` |
+| `host.load_per_core` | value | `window` |
 | `host.pressure_pct` | value | `resource`, `kind` |
 | `host.mem.capacity_kb`, `host.swap.capacity_kb` | value | `type` |
 | `host.swap_io_pages` | counter | `dir` |
 | `host.oom_kills` | counter | |
-| `host.page_faults` | counter | `type` |
-| `host.procs_count` | value | `state` |
-| `host.fd_count` | value | `type` |
 | `host.uptime_min` | value | |
 | `host.fs.capacity_kb`, `host.fs.inodes_count` | value | `mount`, `device`, `type` |
 | `host.disk.io_kb`, `host.disk.io_ops` | counter | `device`, `dir` |
 | `host.disk.io_time_ms` | counter | `device` |
-| `host.disk.io_latency_ms` | value | `device`, `dir` |
-| `host.disk.io_queue` | value | `device` |
+| `host.disk.io_latency_ms` | value | `device` |
 | `host.net.kb`, `host.net.packets`, `host.net.errors`, `host.net.dropped` | counter | `iface`, `dir` |
-| `host.tcp.retransmits` | counter | |
-| `host.tcp.errors`, `host.tcp.listen_drops`, `host.udp.errors` | counter | `type` |
-| `host.tcp.sockets` | value | `state` |
-| `host.conntrack` | value | `type` |
 | `docker.containers_count` | value | `state` |
 | `docker.container.*` | mixed | `service`, plus metric-specific labels |
 | `systemd.units_count` | value | `state` |

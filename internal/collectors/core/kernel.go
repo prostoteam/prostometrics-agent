@@ -37,21 +37,6 @@ func (c *KernelCollector) Collect(_ context.Context) error {
 		if v, ok := vmstat["oom_kill"]; ok {
 			prostometrics.Total("host.oom_kills", float64(v))
 		}
-		// vmstat counts every fault in pgfault and the major subset in
-		// pgmajfault, so reporting pgfault as "minor" would count each major
-		// fault on both lines and hide the shift from memory to disk that
-		// splitting them is for.
-		major, hasMajor := vmstat["pgmajfault"]
-		if hasMajor {
-			prostometrics.Total("host.page_faults", float64(major), prostometrics.Label("type", "major"))
-		}
-		if total, ok := vmstat["pgfault"]; ok {
-			minor := total
-			if hasMajor && total >= major {
-				minor = total - major
-			}
-			prostometrics.Total("host.page_faults", float64(minor), prostometrics.Label("type", "minor"))
-		}
 		emitSwap := func(dir string, key string) {
 			if v, ok := vmstat[key]; ok {
 				prostometrics.Total("host.swap_io_pages", float64(v), prostometrics.Label("dir", dir))
