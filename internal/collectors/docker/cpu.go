@@ -27,6 +27,8 @@ type CPUCollector struct {
 
 	mu   sync.Mutex
 	prev map[string]dockerCPUPrev
+	// oomSeen is keyed by container ID and guarded by mu, like prev.
+	oomSeen map[string]dockerOOMSeen
 
 	// hostMemTotal is what Docker reports as the machine's memory. A container
 	// with no memory limit is handed that number as its limit, so it is the test
@@ -52,6 +54,7 @@ func (c *CPUCollector) Collect(parent context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list containers: %w", err)
 	}
+	c.forgetRemovedContainers(all)
 
 	containers := c.publishContainerStates(all)
 	if len(containers) == 0 {
@@ -108,14 +111,14 @@ sendLoop:
 	return nil
 }
 
-// publishContainerStates reports every container the daemon knows about, running
-// or not, and returns the running ones for the per-container pass. It is the only
-// place a crashed container is visible: the per-service metrics are read from
-// live statistics, so a container that stopped simply vanishes from them and its
-// chart would otherwise hold the last healthy value it published forever.
-// Reporting from the full list means a stopped container keeps reporting zero —
-// and a container that was genuinely removed stops reporting altogether, which is
-// the difference an alert needs.
+// publishContainerStates reports every container the daemon knows about that is
+// meant to be running, running or not, and returns the running ones for the
+// per-container pass. It is the only place a crashed container is visible: the
+// per-service metrics are read from live statistics, so a container that stopped
+// simply vanishes from them and its chart would otherwise hold the last healthy
+// value it published forever. Reporting from the full list means a stopped
+// container keeps reporting zero — and a container that was genuinely removed
+// stops reporting altogether, which is the difference an alert needs.
 func (c *CPUCollector) publishContainerStates(all []dockerContainerSummary) []dockerContainerSummary {
 	running := make([]dockerContainerSummary, 0, len(all))
 	counts := map[string]int{
@@ -136,8 +139,23 @@ func (c *CPUCollector) publishContainerStates(all []dockerContainerSummary) []do
 		}
 		counts[state]++
 
+		// A `docker compose run` container is a one-off command that carries its
+		// service's name, so whatever it reported would be mixed into the
+		// service's own readings: a shell left open in one fails the service's
+		// health check, and one left behind after a failed command reads as the
+		// service being partly down. It is counted and nothing more.
+		if isOneOff(ctr) {
+			continue
+		}
 		if state == "running" {
 			running = append(running, ctr)
+		}
+		// A container that exited with code 0 finished what it was started for,
+		// such as a migration or a setup step; it is the exit Compose's
+		// service_completed_successfully waits for. Reported as down, it would hold
+		// an alert on for as long as it exists.
+		if exitedCleanly(ctr.Status) {
+			continue
 		}
 
 		// Reported as a success rate rather than a raw flag: the average of a
@@ -151,6 +169,70 @@ func (c *CPUCollector) publishContainerStates(all []dockerContainerSummary) []do
 		prostometrics.ValueSparse("docker.containers_count", float64(n), prostometrics.Label("state", state))
 	}
 	return running
+}
+
+// isOneOff reports whether Compose created the container for a single command.
+func isOneOff(ctr dockerContainerSummary) bool {
+	return strings.EqualFold(strings.TrimSpace(ctr.Labels["com.docker.compose.oneoff"]), "true")
+}
+
+// exitedCleanly reads the exit code from the listing's status, "Exited (0) 3
+// hours ago", which is the text `docker ps` prints. The listing carries the code
+// nowhere else, and inspecting every stopped container on every round would
+// cost a request each. The status is read rather than the state, which Podman
+// before 6 reports as "stopped" for the same container. A status in any other
+// shape is not a clean exit, so such a container keeps reporting as down.
+func exitedCleanly(status string) bool {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(status), "Exited (")
+	if !ok {
+		return false
+	}
+	code, _, ok := strings.Cut(rest, ")")
+	return ok && code == "0"
+}
+
+// forgetRemovedContainers drops what was remembered about containers the daemon
+// no longer lists. It goes by the full listing rather than by the running set: a
+// container waiting for its restart policy is not running, and forgetting it then
+// would make its next inspection a first sighting — which never counts as a kill,
+// and is exactly when the kill that restarted it shows.
+func (c *CPUCollector) forgetRemovedContainers(all []dockerContainerSummary) {
+	listed := make(map[string]struct{}, len(all))
+	for _, ctr := range all {
+		listed[ctr.ID] = struct{}{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id := range c.oomSeen {
+		if _, ok := listed[id]; !ok {
+			delete(c.oomSeen, id)
+		}
+	}
+}
+
+// newOOMKill reports whether the container was killed for memory since it was
+// last inspected. Docker's OOMKilled flag is a state that outlives the kill:
+// engines before 24 carry it into the run a restart policy starts, and later
+// engines set it when any process in the container is killed and clear it only
+// when the container next starts. Reported as read, it would hold an alert on for
+// as long as the container keeps running.
+//
+// A kill is therefore the flag turning on, or the flag still on after the
+// container started again, which is how a repeated kill shows on an engine that
+// carries the flag over. On engines 24 and later the flag then stays set for the
+// rest of the run, so a later kill in the same run cannot be told from the first.
+// A container inspected for the first time has nothing to compare with, and a
+// flag already set then is most likely old: counting it would announce the same
+// kill again every time the agent restarts.
+func (c *CPUCollector) newOOMKill(containerID string, killed bool, startedAt string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.oomSeen == nil {
+		c.oomSeen = make(map[string]dockerOOMSeen)
+	}
+	last, seen := c.oomSeen[containerID]
+	c.oomSeen[containerID] = dockerOOMSeen{killed: killed, startedAt: startedAt}
+	return seen && killed && (!last.killed || last.startedAt != startedAt)
 }
 
 // ensureHostMemTotal keeps trying until the daemon answers. Reading it once and
@@ -289,7 +371,7 @@ func (c *CPUCollector) collectContainer(ctx context.Context, ctr dockerContainer
 		}
 
 		oomKilled := 0.0
-		if info.State.OOMKilled {
+		if c.newOOMKill(ctr.ID, info.State.OOMKilled, info.State.StartedAt) {
 			oomKilled = 1
 		}
 		prostometrics.ValueSparse("docker.container.oom_killed", oomKilled, targetLabel)

@@ -52,8 +52,8 @@ reading that separates those. It needs Linux 4.20+ built with `CONFIG_PSI`, and 
 | Metric | Kind | Unit | Labels |
 |---|---|---|---|
 | `docker.containers_count` | value | count | `state` (running,exited,restarting,paused,created,dead,other) |
-| `docker.container.up` | value | 1/0 | `service` |
-| `docker.container.healthy` | value | 1/0 | `service` |
+| `docker.container.up` | value | percent | `service` |
+| `docker.container.healthy` | value | percent | `service` |
 | `docker.container.oom_killed` | value | 1/0 | `service` |
 | `docker.container.cpu.usage_pct` | value | percent | `service` |
 | `docker.container.cpu.throttled_pct` | value | percent | `service` |
@@ -66,9 +66,31 @@ reading that separates those. It needs Linux 4.20+ built with `CONFIG_PSI`, and 
 Docker metrics are enabled automatically when a local Docker socket is detected at `/var/run/docker.sock`. Containers
 are identified by their Compose service, Swarm service, or container name.
 
+`docker.container.up` and `docker.container.healthy` are sent as success rates, 100 or 0 per reading, so a service's
+line reads as the share of the time its containers were up or passing their health check.
+
 `docker.container.up` is read from the full container list rather than from live statistics, so a container that
 crashed and stayed down keeps reporting zero instead of vanishing — and a container that was genuinely removed stops
 reporting altogether. That difference is what an alert needs.
+
+Containers that are not meant to keep running never read as down. A container that exited with code 0 has finished
+what it was started for, such as a migration or a setup step, and is left out of `docker.container.up`; it is the exit
+code Compose's `service_completed_successfully` waits for. The exit code is all the agent has to go on, so a
+long-running service whose process exits with code 0 when it is stopped is left out the same way. A one-off container
+from `docker compose run` carries its service's name, so it is left out of every per-service metric: one left behind
+would make a running service look partly down, and a shell left open in one would fail the service's health check.
+Both are still counted in `docker.containers_count`.
+
+`docker.container.oom_killed` is 1 on the reading where a kill first shows, and 0 otherwise. Docker's own flag outlives
+the kill: engines before 24 keep it set in the run a restart policy starts, and later engines set it when any process
+in the container is killed and keep it until the container next starts. Reported as read, it would stay at 1 long
+after the event. The agent counts a kill when the flag turns on between two readings, or is still on after the
+container started again. Only running containers are inspected, and the first reading of each container only sets a
+baseline, so a kill from before it — including one from before the agent restarted — is not reported. On Docker 24 and
+later a restart clears the flag before the next reading, so a kill that ends the container's main process shows in
+`docker.container.restart_count`, or in `docker.container.up` if the container stays down, rather than here. Within
+one run the flag stays set on those engines, so only the first kill in a run is reported. `host.oom_kills` counts
+every kill on the host.
 
 The memory limit and the share of it are reported only when a limit was actually set. Docker hands an unconstrained
 container the host's own memory as its limit, and reporting a share of that would show every such container at a

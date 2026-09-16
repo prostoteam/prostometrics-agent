@@ -28,6 +28,7 @@ type dockerContainerInfo struct {
 		Status       string `json:"Status"`
 		OOMKilled    bool   `json:"OOMKilled"`
 		ExitCode     int    `json:"ExitCode"`
+		StartedAt    string `json:"StartedAt"`
 		Health       *struct {
 			Status        string `json:"Status"`
 			FailingStreak int    `json:"FailingStreak"`
@@ -58,6 +59,13 @@ type dockerThrottlingData struct {
 	Periods          uint64 `json:"periods"`
 	ThrottledPeriods uint64 `json:"throttled_periods"`
 	ThrottledTime    uint64 `json:"throttled_time"`
+}
+
+// dockerOOMSeen is what the last inspection of a container said about its
+// out-of-memory flag, which is what tells a new kill from one already reported.
+type dockerOOMSeen struct {
+	killed    bool
+	startedAt string
 }
 
 type dockerCPUPrev struct {
