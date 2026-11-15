@@ -47,6 +47,7 @@ repeating failure.
 - `--workload` / `-w`: workload scope; defaults to the hostname.
 - `--config` / `-c`: optional YAML configuration path.
 - `--verbose` / `-v`: verbose SDK delivery logs.
+- `--version`: print the installed agent version without starting collection.
 
 Default configuration paths are `/etc/prostometrics/agent.yaml` for system installs and
 `$XDG_CONFIG_HOME/prostometrics/agent.yaml` for user installs.

@@ -393,3 +393,48 @@ timeout — the collector asks the runner for the time its slowest command needs
 - An instance is labelled by the host it connects to unless `label` names it explicitly, which matters when two
   instances live behind the same address. A service reached over a unix socket is named after the socket instead, so
   `/var/run/redis.sock` becomes `redis` and `postgres:///app?host=/var/run/postgresql` becomes `postgresql`.
+
+## Alert diagnostics
+
+Built-in host alerts can ask this agent for a read-only diagnostic report through
+an ordinary metrics acknowledgement. Supported scenarios collect systemd service
+status/journal, container state/logs, CPU, memory, disks, network, nginx or database
+host context. For failed systemd services, the report includes execution timing,
+runtime limits and service identity. Access errors with a recognized absolute path
+add path ownership/permissions and filesystem capacity checks. Network wait failures
+add wait settings, network manager states, routes and up to five interface reports
+(managed interfaces first), plus selected non-secret network configuration fields.
+Current state is distinguished from historical journal events. Checks never restart
+services or change network or filesystem settings. The server receives bounded plain output and may use AI
+to explain it in the alert interface and notifications. Recognizable secrets
+are redacted, but arbitrary application logs may still contain sensitive data.
+
+No inbound connection or separate polling is needed. With diagnostics protocol v2,
+the server supplies reviewed, versioned shell scenarios through the authenticated
+same-origin endpoint `/api/agent/diagnostics/scripts/:taskId`. Tasks pin the version
+and SHA-256. The agent reserves the task before downloading, verifies the digest,
+refuses redirects, and bounds each HTTP download to five seconds and 64 KiB.
+Transient failures get up to three attempts within ten seconds total and task
+expiry; integrity/auth/redirect failures are not retried. The private
+content-addressed cache retains up to 128 scripts; cached content is reverified.
+On download availability failure, a bundled fallback can run only if its full content
+matches the pinned digest. Integrity/authentication failures do not use a fallback.
+Legacy tasks without script metadata use the bundled scenarios. Scripts run with
+the agent's OS permissions: time and size limits do not provide a shell sandbox. A script runs at most once
+per task, with a 12-second deadline and 48 KiB output cap. Command timeouts keep
+children in the same process group, including older downloaded scenarios; commands
+that ignore termination are killed after a further second.
+Container reports prioritize unhealthy services and exclude successful completed
+jobs and Compose one-off containers from detailed inspection. Durable reservations
+and results survive restarts in `/var/lib/prostometrics/diagnostics` (private
+permissions, cleaned after 30 days). Temporary upload/storage failures retry the saved result. Reservation creation
+and result/acknowledgement renames sync the parent directory; a reservation sync
+failure prevents execution and queues an interruption report for retry in the
+same running process. Persistence failures retry the result without recollection.
+An interrupted script is reported as interrupted and is never run again.
+
+The agent advertises diagnostic capability whenever its local state is available.
+Collection is controlled centrally by the service administrator; the agent only
+collects a report when the server issues a task. Set `PROSTOMETRICS_DIAGNOSTICS_DIR`
+to a private writable directory for a user service.
+If local state cannot be initialized, metrics continue with diagnostics disabled.

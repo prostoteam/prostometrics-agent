@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -21,10 +24,24 @@ import (
 	"github.com/prostoteam/prostometrics-agent/internal/collectors/prom"
 	"github.com/prostoteam/prostometrics-agent/internal/collectors/rabbitmq"
 	"github.com/prostoteam/prostometrics-agent/internal/collectors/redis"
+	"github.com/prostoteam/prostometrics-agent/internal/diagnostics"
 	prostometrics "github.com/prostoteam/prostometrics-go"
 )
 
 const prostometricsIngestHost = "prostometrics.ru"
+
+// Optional label for builds made from an unreleased source snapshot.
+var buildVersion string
+
+func agentVersion() string {
+	if buildVersion != "" {
+		return buildVersion
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
+}
 
 type stringFlag struct {
 	value string
@@ -41,6 +58,7 @@ func (f *stringFlag) Set(v string) error {
 
 func main() {
 	var verbose bool
+	var showVersion bool
 	var workloadFlag stringFlag
 	var configPath string
 	flag.Var(&workloadFlag, "workload", "workload scope sent with every ingest request")
@@ -49,7 +67,13 @@ func main() {
 	flag.StringVar(&configPath, "c", "", "shorthand for --config")
 	flag.BoolVar(&verbose, "verbose", false, "enable verbose logging")
 	flag.BoolVar(&verbose, "v", false, "shorthand for --verbose")
+	flag.BoolVar(&showVersion, "version", false, "print agent version and exit")
 	flag.Parse()
+	if showVersion {
+		fmt.Println("prostometrics-agent " + agentVersion())
+		return
+	}
+	log.Printf("agent: version=%s", agentVersion())
 
 	endpointHost := prostometricsIngestHost
 	if envEndpoint := strings.TrimSpace(os.Getenv("PROSTOMETRICS_ENDPOINT")); envEndpoint != "" {
@@ -120,18 +144,36 @@ func main() {
 	if runtimeCfg.ExecEnabled {
 		probes = append(probes, execcollector.NewProbe(runtimeCfg.ExecCommands, runtimeCfg.ExecEvery))
 	}
+	if diagnosticClient != nil {
+		defer diagnosticClient.Close()
+	}
 	agent.Run(ctx, core, probes)
 	flushAndClose()
 }
+
+var diagnosticClient *diagnostics.Client
 
 func initClient(workload string, endpoint string, apiKey string, verbose bool) error {
 	if apiKey == "" {
 		return errors.New("PROSTOMETRICS_API_KEY is required")
 	}
-	_, err := prostometrics.Init(workload, prostometrics.Config{
-		Endpoint: endpoint,
-		APIKey:   apiKey,
-		Verbose:  verbose,
+	var transport prostometrics.Transport
+	dir := os.Getenv("PROSTOMETRICS_DIAGNOSTICS_DIR")
+	if dir == "" {
+		dir = "/var/lib/prostometrics/diagnostics"
+	}
+	manager, err := diagnostics.New(endpoint, apiKey, workload, dir)
+	if err != nil {
+		log.Printf("diagnostics: unavailable; cannot initialize local state")
+	} else {
+		diagnosticClient = manager
+		transport = &prostometrics.HTTPTransport{Endpoint: endpoint, APIKey: apiKey, Client: &http.Client{Transport: manager}}
+	}
+	_, err = prostometrics.Init(workload, prostometrics.Config{
+		Transport: transport,
+		Endpoint:  endpoint,
+		APIKey:    apiKey,
+		Verbose:   verbose,
 	})
 	if errors.Is(err, prostometrics.ErrMissingAPIKey) {
 		return errors.New("PROSTOMETRICS_API_KEY is required")
